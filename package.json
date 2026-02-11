@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "discourse-api": "^1.8.0"
+  }
+}
