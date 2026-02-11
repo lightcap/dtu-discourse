@@ -1,0 +1,5 @@
+/dtu-discourse
+*.exe
+*.test
+*.out
+.env
