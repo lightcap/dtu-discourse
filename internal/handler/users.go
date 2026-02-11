@@ -120,6 +120,17 @@ func (h *UsersHandler) UpdateUser(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, model.SuccessResponse{Success: "OK"})
 }
 
+// PUT /admin/users/{id}/approve
+func (h *UsersHandler) Approve(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathParamInt(r, "id")
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid user id")
+		return
+	}
+	h.Store.UpdateUser(id, map[string]interface{}{"approved": true})
+	writeJSON(w, http.StatusOK, model.SuccessResponse{Success: "OK"})
+}
+
 // PUT /admin/users/{id}/activate
 func (h *UsersHandler) Activate(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathParamInt(r, "id")

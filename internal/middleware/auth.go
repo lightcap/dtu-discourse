@@ -24,6 +24,14 @@ func Auth(s *store.Store) func(http.Handler) http.Handler {
 			apiKey := r.Header.Get("Api-Key")
 			apiUsername := r.Header.Get("Api-Username")
 
+			// Fall back to query parameters (used by some SDK clients)
+			if apiKey == "" {
+				apiKey = r.URL.Query().Get("api_key")
+			}
+			if apiUsername == "" {
+				apiUsername = r.URL.Query().Get("api_username")
+			}
+
 			if apiKey == "" {
 				http.Error(w, `{"errors":["not logged in"],"error_type":"not_logged_in"}`, http.StatusForbidden)
 				return

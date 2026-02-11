@@ -117,17 +117,22 @@ func (s *Store) seed() {
 		Email: "alice@example.com", AvatarTemplate: "/letter_avatar_proxy/v4/letter/a/d0a95e/{size}.png",
 		Active: true, Admin: false, Moderator: false, TrustLevel: 2,
 		CreatedAt: now.Add(-20 * 24 * time.Hour), Approved: true,
+		ExternalID: "ext-alice",
 	}
 	user2 := &model.User{
 		ID: 3, Username: "bob", Name: "Bob Builder",
 		Email: "bob@example.com", AvatarTemplate: "/letter_avatar_proxy/v4/letter/b/b4e14e/{size}.png",
 		Active: true, Admin: false, Moderator: false, TrustLevel: 1,
 		CreatedAt: now.Add(-10 * 24 * time.Hour), Approved: true,
+		ExternalID: "ext-bob",
 	}
 	for _, u := range []*model.User{systemUser, admin, user1, user2} {
 		s.Users[u.ID] = u
 		s.UsersByName[u.Username] = u
 		s.UsersByEmail[u.Email] = u
+		if u.ExternalID != "" {
+			s.UsersByExtID[u.ExternalID] = u
+		}
 	}
 	s.NextUserID = 4
 
@@ -404,6 +409,17 @@ func (s *Store) ListUsers(listType string) []model.User {
 		default:
 			result = append(result, *u)
 		}
+	}
+	return result
+}
+
+// ListAllUsers returns every user including system.
+func (s *Store) ListAllUsers() []model.User {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]model.User, 0, len(s.Users))
+	for _, u := range s.Users {
+		result = append(result, *u)
 	}
 	return result
 }

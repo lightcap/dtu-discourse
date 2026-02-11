@@ -51,10 +51,22 @@ func decodeBody(r *http.Request) (map[string]interface{}, error) {
 		return nil, err
 	}
 	for k, v := range r.Form {
-		if len(v) == 1 {
-			data[k] = v[0]
+		val := interface{}(v[0])
+		if len(v) > 1 {
+			val = v
+		}
+		// Parse bracket-notation keys like "post[raw]" into nested maps.
+		if idx := strings.Index(k, "["); idx > 0 && strings.HasSuffix(k, "]") {
+			outer := k[:idx]
+			inner := k[idx+1 : len(k)-1]
+			nested, ok := data[outer].(map[string]interface{})
+			if !ok {
+				nested = make(map[string]interface{})
+				data[outer] = nested
+			}
+			nested[inner] = val
 		} else {
-			data[k] = v
+			data[k] = val
 		}
 	}
 	return data, nil
