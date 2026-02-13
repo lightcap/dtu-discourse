@@ -4,6 +4,8 @@
 package store
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync"
@@ -61,6 +63,11 @@ type Store struct {
 	NextPostActionID int
 
 	APIKeys       map[string]string // key -> username
+
+	// SSO configuration
+	SSOSecret      string
+	SSOCallbackURL string
+	SSONonces      map[string]time.Time
 }
 
 func New() *Store {
@@ -87,6 +94,7 @@ func New() *Store {
 		SiteSettings:   make(map[string]*model.SiteSetting),
 		PostActions:    make(map[int]*model.PostAction),
 		APIKeys:        make(map[string]string),
+		SSONonces:      make(map[string]time.Time),
 	}
 	s.seed()
 	return s
@@ -1346,4 +1354,26 @@ func (s *Store) ValidateAPIKey(key string) (string, bool) {
 	defer s.mu.RUnlock()
 	username, ok := s.APIKeys[key]
 	return username, ok
+}
+
+// ---------- SSO Nonce Operations ----------
+
+func (s *Store) CreateSSONonce() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	nonce := fmt.Sprintf("%d_%s", time.Now().UnixNano(), hex.EncodeToString(b))
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.SSONonces[nonce] = time.Now().UTC()
+	return nonce
+}
+
+func (s *Store) ValidateSSONonce(nonce string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.SSONonces[nonce]; !ok {
+		return false
+	}
+	delete(s.SSONonces, nonce)
+	return true
 }

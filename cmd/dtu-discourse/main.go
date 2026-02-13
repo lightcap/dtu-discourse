@@ -20,6 +20,7 @@ import (
 	"github.com/lightcap/dtu-discourse/internal/handler"
 	"github.com/lightcap/dtu-discourse/internal/middleware"
 	"github.com/lightcap/dtu-discourse/internal/store"
+	"github.com/lightcap/dtu-discourse/internal/webhook"
 )
 
 func main() {
@@ -29,13 +30,29 @@ func main() {
 	}
 
 	s := store.New()
-	mux := BuildRouter(s)
+
+	// SSO configuration (optional)
+	s.SSOSecret = os.Getenv("DISCOURSE_CONNECT_SECRET")
+	s.SSOCallbackURL = os.Getenv("SSO_CALLBACK_URL")
+
+	// Webhook dispatcher (optional)
+	webhookURL := os.Getenv("WEBHOOK_URL")
+	webhookSecret := os.Getenv("WEBHOOK_SECRET")
+	dispatcher := webhook.New(webhookURL, webhookSecret)
+
+	mux := BuildRouter(s, dispatcher)
 
 	wrapped := middleware.Auth(s)(mux)
 
 	log.Printf("DTU Discourse listening on :%s", port)
 	log.Printf("Default API key: test_api_key (user: system)")
 	log.Printf("Admin API key:   admin_api_key (user: admin)")
+	if s.SSOSecret != "" && s.SSOCallbackURL != "" {
+		log.Printf("SSO enabled → callback: %s", s.SSOCallbackURL)
+	}
+	if webhookURL != "" {
+		log.Printf("Webhooks enabled → %s", webhookURL)
+	}
 	if err := http.ListenAndServe(":"+port, wrapped); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)
@@ -45,14 +62,14 @@ func main() {
 // BuildRouter creates the HTTP mux with all Discourse-compatible routes.
 // Wildcard path segments (e.g. {username}) will match values with or without
 // a .json suffix; handlers strip the suffix when extracting the value.
-func BuildRouter(s *store.Store) *http.ServeMux {
+func BuildRouter(s *store.Store, dispatcher *webhook.Dispatcher) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// ---- Core handlers ----
 	users := &handler.UsersHandler{Store: s}
 	cats := &handler.CategoriesHandler{Store: s}
 	topics := &handler.TopicsHandler{Store: s}
-	posts := &handler.PostsHandler{Store: s}
+	posts := &handler.PostsHandler{Store: s, Webhook: dispatcher}
 	groups := &handler.GroupsHandler{Store: s}
 	search := &handler.SearchHandler{Store: s}
 	tags := &handler.TagsHandler{Store: s}
@@ -612,6 +629,7 @@ func BuildRouter(s *store.Store) *http.ServeMux {
 	mux.HandleFunc("GET /session/2fa.json", session.TwoFactorStatus)
 	mux.HandleFunc("GET /session/sso", session.SSORedirect)
 	mux.HandleFunc("GET /session/sso_provider", session.SSOProvider)
+	mux.HandleFunc("GET /session/sso_login", session.SSOLogin)
 	mux.HandleFunc("POST /session/email-login/{token}", session.EmailLogin)
 	mux.HandleFunc("GET /session/email-login/{token}", session.EmailLoginInfo)
 	mux.HandleFunc("DELETE /session/{username}", session.Logout)

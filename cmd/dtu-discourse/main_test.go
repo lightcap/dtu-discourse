@@ -2,6 +2,10 @@ package main
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -19,7 +23,7 @@ import (
 func testServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	s := store.New()
-	mux := BuildRouter(s)
+	mux := BuildRouter(s, nil)
 	wrapped := middleware.Auth(s)(mux)
 	return httptest.NewServer(wrapped)
 }
@@ -1349,5 +1353,153 @@ func TestLifecycle_UserCreateSuspendDelete(t *testing.T) {
 	resp, _ = apiRequest(ts, "DELETE", "/admin/users/"+uid+".json", nil)
 	if resp.StatusCode != 200 {
 		t.Fatalf("delete: expected 200, got %d", resp.StatusCode)
+	}
+}
+
+// ============================================================
+// SSO Round-Trip
+// ============================================================
+
+func TestSSO_RoundTrip(t *testing.T) {
+	secret := "test_sso_secret_key"
+
+	// Set up store with SSO config
+	s := store.New()
+	s.SSOSecret = secret
+	// SSOCallbackURL will be set to the test server's own URL below (we use a placeholder for redirect)
+	s.SSOCallbackURL = "http://eve.local/api/discourse/sso"
+
+	mux := BuildRouter(s, nil)
+	wrapped := middleware.Auth(s)(mux)
+	ts := httptest.NewServer(wrapped)
+	defer ts.Close()
+
+	// Update callback URL to point to our test server's sso_login for a full round trip
+	s.SSOCallbackURL = ts.URL + "/session/sso_login"
+
+	// 1. GET /session/sso — should 302 redirect with sso+sig params
+	client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse // don't follow redirects
+	}}
+	resp, err := client.Get(ts.URL + "/session/sso")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 302 {
+		t.Fatalf("expected 302, got %d", resp.StatusCode)
+	}
+	loc := resp.Header.Get("Location")
+	if loc == "" {
+		t.Fatal("missing Location header")
+	}
+
+	// Parse the redirect URL to extract sso payload and sig
+	redirectURL, err := url.Parse(loc)
+	if err != nil {
+		t.Fatalf("parse redirect URL: %v", err)
+	}
+	ssoPayload := redirectURL.Query().Get("sso")
+	sig := redirectURL.Query().Get("sig")
+	if ssoPayload == "" || sig == "" {
+		t.Fatal("missing sso or sig in redirect URL")
+	}
+
+	// Verify the HMAC signature
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(ssoPayload))
+	expectedSig := hex.EncodeToString(mac.Sum(nil))
+	if sig != expectedSig {
+		t.Fatal("signature mismatch on redirect")
+	}
+
+	// Decode the payload and extract the nonce
+	decoded, err := base64.StdEncoding.DecodeString(ssoPayload)
+	if err != nil {
+		t.Fatalf("decode sso payload: %v", err)
+	}
+	params, err := url.ParseQuery(string(decoded))
+	if err != nil {
+		t.Fatalf("parse sso params: %v", err)
+	}
+	nonce := params.Get("nonce")
+	if nonce == "" {
+		t.Fatal("missing nonce in payload")
+	}
+
+	// 2. Build the return payload (simulating what Eve would send back)
+	returnPayload := url.Values{
+		"nonce":       {nonce},
+		"email":       {"ssotest@example.com"},
+		"external_id": {"ext-sso-test"},
+		"username":    {"ssotestuser"},
+		"name":        {"SSO Test User"},
+	}
+	returnB64 := base64.StdEncoding.EncodeToString([]byte(returnPayload.Encode()))
+	returnMAC := hmac.New(sha256.New, []byte(secret))
+	returnMAC.Write([]byte(returnB64))
+	returnSig := hex.EncodeToString(returnMAC.Sum(nil))
+
+	// 3. GET /session/sso_login with the return payload
+	loginURL := ts.URL + "/session/sso_login?sso=" + url.QueryEscape(returnB64) + "&sig=" + url.QueryEscape(returnSig)
+	resp, err = client.Get(loginURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 302 {
+		t.Fatalf("sso_login: expected 302, got %d", resp.StatusCode)
+	}
+
+	// 4. Verify user was created in store
+	u := s.GetUserByExternalID("ext-sso-test")
+	if u == nil {
+		t.Fatal("SSO user was not created in store")
+	}
+	if u.Username != "ssotestuser" {
+		t.Errorf("expected username 'ssotestuser', got %q", u.Username)
+	}
+	if u.Email != "ssotest@example.com" {
+		t.Errorf("expected email 'ssotest@example.com', got %q", u.Email)
+	}
+}
+
+func TestSSO_InvalidSignatureRejected(t *testing.T) {
+	s := store.New()
+	s.SSOSecret = "real_secret"
+	s.SSOCallbackURL = "http://localhost/callback"
+
+	mux := BuildRouter(s, nil)
+	wrapped := middleware.Auth(s)(mux)
+	ts := httptest.NewServer(wrapped)
+	defer ts.Close()
+
+	// Build a payload with wrong secret
+	payload := base64.StdEncoding.EncodeToString([]byte("nonce=fake&email=x@y.com&external_id=1&username=x"))
+	mac := hmac.New(sha256.New, []byte("wrong_secret"))
+	mac.Write([]byte(payload))
+	badSig := hex.EncodeToString(mac.Sum(nil))
+
+	resp, err := http.Get(ts.URL + "/session/sso_login?sso=" + url.QueryEscape(payload) + "&sig=" + url.QueryEscape(badSig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("expected 403 for bad signature, got %d", resp.StatusCode)
+	}
+}
+
+func TestSSO_DisabledReturnsFallback(t *testing.T) {
+	// When SSO is not configured, /session/sso returns JSON stub
+	ts := testServer(t)
+	defer ts.Close()
+	resp, body := apiGet(ts, "/session/sso")
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	data := parseJSON(t, body)
+	if _, ok := data["sso_url"]; !ok {
+		t.Fatal("expected sso_url in fallback response")
 	}
 }
