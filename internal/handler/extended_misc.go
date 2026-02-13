@@ -40,10 +40,36 @@ func (h *MiscHandler) FilterTopics(w http.ResponseWriter, r *http.Request) {
 
 // GET /directory_items
 func (h *MiscHandler) DirectoryItems(w http.ResponseWriter, r *http.Request) {
+	users := h.Store.ListAllUsers()
+	var items []map[string]interface{}
+	for _, u := range users {
+		if u.ID < 0 {
+			continue // skip system user
+		}
+		items = append(items, map[string]interface{}{
+			"id": u.ID,
+			"user": map[string]interface{}{
+				"id":              u.ID,
+				"username":        u.Username,
+				"name":            u.Name,
+				"avatar_template": u.AvatarTemplate,
+			},
+			"likes_received": 0,
+			"likes_given":    0,
+			"topics_entered": 0,
+			"topic_count":    0,
+			"post_count":     0,
+			"days_visited":   0,
+			"posts_read":     0,
+		})
+	}
+	if items == nil {
+		items = []map[string]interface{}{}
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"directory_items":            []interface{}{},
-		"meta":                       map[string]interface{}{"total_rows_directory_items": 0},
-		"total_rows_directory_items": 0,
+		"directory_items":            items,
+		"meta":                       map[string]interface{}{"total_rows_directory_items": len(items)},
+		"total_rows_directory_items": len(items),
 	})
 }
 

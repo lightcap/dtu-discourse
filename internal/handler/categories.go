@@ -2,6 +2,7 @@ package handler
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/lightcap/dtu-discourse/internal/model"
@@ -99,13 +100,28 @@ func (h *CategoriesHandler) Show(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /c/{slug}/{id}.json  — list topics in category
+// Also handles /c/{slug}.json where {id} captures slug.json
 func (h *CategoriesHandler) ListTopics(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathParamInt(r, "id")
-	if !ok {
-		writeError(w, http.StatusBadRequest, "invalid category id")
+	if ok {
+		topics := h.Store.TopicsByCategory(id)
+		writeJSON(w, http.StatusOK, model.TopicListResponse{
+			TopicList: model.TopicList{
+				CanCreateTopic: true,
+				PerPage:        30,
+				Topics:         topics,
+			},
+		})
 		return
 	}
-	topics := h.Store.TopicsByCategory(id)
+	// Try slug lookup (e.g. /c/general.json where {id} = "general.json")
+	slug := strings.TrimSuffix(pathParam(r, "id"), ".json")
+	cat := h.Store.GetCategoryBySlug(slug)
+	if cat == nil {
+		writeError(w, http.StatusNotFound, "category not found")
+		return
+	}
+	topics := h.Store.TopicsByCategory(cat.ID)
 	writeJSON(w, http.StatusOK, model.TopicListResponse{
 		TopicList: model.TopicList{
 			CanCreateTopic: true,
@@ -116,9 +132,22 @@ func (h *CategoriesHandler) ListTopics(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /c/{category_slug}/l/latest.json
+// Also handles /c/{categoryId}/l/latest.json where category_slug is actually a numeric ID
 func (h *CategoriesHandler) LatestTopics(w http.ResponseWriter, r *http.Request) {
 	slug := pathParam(r, "category_slug")
 	slug = strings.TrimSuffix(slug, ".json")
+	// Try numeric ID first
+	if id, err := strconv.Atoi(slug); err == nil {
+		topics := h.Store.TopicsByCategory(id)
+		writeJSON(w, http.StatusOK, model.TopicListResponse{
+			TopicList: model.TopicList{
+				CanCreateTopic: true,
+				PerPage:        30,
+				Topics:         topics,
+			},
+		})
+		return
+	}
 	cat := h.Store.GetCategoryBySlug(slug)
 	if cat == nil {
 		writeError(w, http.StatusNotFound, "category not found")
@@ -142,6 +171,23 @@ func (h *CategoriesHandler) TopTopics(w http.ResponseWriter, r *http.Request) {
 // GET /c/{category_slug}/l/new.json
 func (h *CategoriesHandler) NewTopics(w http.ResponseWriter, r *http.Request) {
 	h.LatestTopics(w, r) // Same behavior for DTU
+}
+
+// GET /c/{category_slug}/{category_id}/l/latest.json (and hot/top/new variants)
+func (h *CategoriesHandler) LatestTopicsBySlugAndID(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathParamInt(r, "category_id")
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid category id")
+		return
+	}
+	topics := h.Store.TopicsByCategory(id)
+	writeJSON(w, http.StatusOK, model.TopicListResponse{
+		TopicList: model.TopicList{
+			CanCreateTopic: true,
+			PerPage:        30,
+			Topics:         topics,
+		},
+	})
 }
 
 // POST /categories/reorder
