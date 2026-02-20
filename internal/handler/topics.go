@@ -17,6 +17,7 @@ type TopicsHandler struct {
 func (h *TopicsHandler) Latest(w http.ResponseWriter, r *http.Request) {
 	topics := h.Store.ListTopics("latest")
 	writeJSON(w, http.StatusOK, model.TopicListResponse{
+		Users: h.Store.UsersForTopics(topics),
 		TopicList: model.TopicList{
 			CanCreateTopic: true,
 			PerPage:        30,
@@ -69,6 +70,7 @@ func (h *TopicsHandler) TopicsByUser(w http.ResponseWriter, r *http.Request) {
 	username = strings.TrimSuffix(username, ".json")
 	topics := h.Store.TopicsByUser(username)
 	writeJSON(w, http.StatusOK, model.TopicListResponse{
+		Users: h.Store.UsersForTopics(topics),
 		TopicList: model.TopicList{
 			CanCreateTopic: true,
 			PerPage:        30,

@@ -140,6 +140,7 @@ func (h *CategoriesHandler) LatestTopics(w http.ResponseWriter, r *http.Request)
 	if id, err := strconv.Atoi(slug); err == nil {
 		topics := h.Store.TopicsByCategory(id)
 		writeJSON(w, http.StatusOK, model.TopicListResponse{
+			Users: h.Store.UsersForTopics(topics),
 			TopicList: model.TopicList{
 				CanCreateTopic: true,
 				PerPage:        30,
@@ -155,6 +156,7 @@ func (h *CategoriesHandler) LatestTopics(w http.ResponseWriter, r *http.Request)
 	}
 	topics := h.Store.TopicsByCategory(cat.ID)
 	writeJSON(w, http.StatusOK, model.TopicListResponse{
+		Users: h.Store.UsersForTopics(topics),
 		TopicList: model.TopicList{
 			CanCreateTopic: true,
 			PerPage:        30,
@@ -182,6 +184,7 @@ func (h *CategoriesHandler) LatestTopicsBySlugAndID(w http.ResponseWriter, r *ht
 	}
 	topics := h.Store.TopicsByCategory(id)
 	writeJSON(w, http.StatusOK, model.TopicListResponse{
+		Users: h.Store.UsersForTopics(topics),
 		TopicList: model.TopicList{
 			CanCreateTopic: true,
 			PerPage:        30,

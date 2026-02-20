@@ -180,6 +180,10 @@ func (s *Store) seed() {
 		Bumped: true, BumpedAt: now.Add(-20 * 24 * time.Hour),
 		Archetype: "regular", Visible: true, Views: 42, LikeCount: 5,
 		LastPosterUsername: "alice", CategoryID: 1, Tags: []string{"welcome", "intro"},
+		Posters: []model.Poster{
+			{UserID: 1, Description: "Original Poster", Extras: "latest"},
+			{UserID: 2, Description: "Most Recent Poster"},
+		},
 	}
 	topic2 := &model.Topic{
 		ID: 2, Title: "How to use the API", FancyTitle: "How to use the API",
@@ -188,6 +192,9 @@ func (s *Store) seed() {
 		Bumped: true, BumpedAt: now.Add(-15 * 24 * time.Hour),
 		Archetype: "regular", Visible: true, Views: 15, LikeCount: 2,
 		LastPosterUsername: "admin", CategoryID: 1, Tags: []string{"api", "howto"},
+		Posters: []model.Poster{
+			{UserID: 1, Description: "Original Poster", Extras: "latest"},
+		},
 	}
 	topic3 := &model.Topic{
 		ID: 3, Title: "Need help with plugins", FancyTitle: "Need help with plugins",
@@ -196,6 +203,9 @@ func (s *Store) seed() {
 		Bumped: true, BumpedAt: now.Add(-5 * 24 * time.Hour),
 		Archetype: "regular", Visible: true, Views: 8, LikeCount: 0,
 		LastPosterUsername: "bob", CategoryID: 2, Tags: []string{"plugins", "help"},
+		Posters: []model.Poster{
+			{UserID: 3, Description: "Original Poster", Extras: "latest"},
+		},
 	}
 	for _, t := range []*model.Topic{topic1, topic2, topic3} {
 		s.Topics[t.ID] = t
@@ -592,6 +602,32 @@ func (s *Store) TopicsByCategory(categoryID int) []model.Topic {
 	return result
 }
 
+// UsersForTopics collects unique users referenced by topic Posters.
+// Caller must NOT hold s.mu.
+func (s *Store) UsersForTopics(topics []model.Topic) []model.BasicUser {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	seen := map[int]bool{}
+	var users []model.BasicUser
+	for _, t := range topics {
+		for _, p := range t.Posters {
+			if seen[p.UserID] {
+				continue
+			}
+			seen[p.UserID] = true
+			if u, ok := s.Users[p.UserID]; ok {
+				users = append(users, model.BasicUser{
+					ID:             u.ID,
+					Username:       u.Username,
+					Name:           u.Name,
+					AvatarTemplate: u.AvatarTemplate,
+				})
+			}
+		}
+	}
+	return users
+}
+
 func (s *Store) TopicsByUser(username string) []model.Topic {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -649,6 +685,9 @@ func (s *Store) CreateTopic(title, raw string, categoryID, userID int, tags []st
 		CreatedAt: now, LastPostedAt: now, Bumped: true, BumpedAt: now,
 		Archetype: archetype, Visible: true, CategoryID: categoryID,
 		LastPosterUsername: u.Username, Tags: tags,
+		Posters: []model.Poster{
+			{UserID: u.ID, Description: "Original Poster", Extras: "latest"},
+		},
 	}
 	if tags == nil {
 		t.Tags = []string{}
@@ -798,6 +837,17 @@ func (s *Store) CreatePost(topicID int, raw string, userID int, replyTo *int) (*
 	t.LastPostedAt = now
 	t.BumpedAt = now
 	t.LastPosterUsername = u.Username
+	// Add user to topic posters if not already present
+	hasPoster := false
+	for _, poster := range t.Posters {
+		if poster.UserID == u.ID {
+			hasPoster = true
+			break
+		}
+	}
+	if !hasPoster {
+		t.Posters = append(t.Posters, model.Poster{UserID: u.ID, Description: "Most Recent Poster"})
+	}
 
 	p := &model.Post{
 		ID: s.NextPostID, Username: u.Username, Name: u.Name,

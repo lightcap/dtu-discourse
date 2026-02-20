@@ -23,6 +23,7 @@ func (h *TagsHandler) TopicsByTag(w http.ResponseWriter, r *http.Request) {
 	tagName := strings.TrimSuffix(pathParam(r, "tag"), ".json")
 	topics := h.Store.TopicsByTag(tagName)
 	writeJSON(w, http.StatusOK, model.TopicListResponse{
+		Users: h.Store.UsersForTopics(topics),
 		TopicList: model.TopicList{
 			CanCreateTopic: true,
 			PerPage:        30,
@@ -51,6 +52,7 @@ func (h *TagsHandler) TopicsByCategoryAndTag(w http.ResponseWriter, r *http.Requ
 		filtered = []model.Topic{}
 	}
 	writeJSON(w, http.StatusOK, model.TopicListResponse{
+		Users: h.Store.UsersForTopics(filtered),
 		TopicList: model.TopicList{
 			CanCreateTopic: true,
 			PerPage:        30,
