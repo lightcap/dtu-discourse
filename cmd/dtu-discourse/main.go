@@ -20,6 +20,7 @@ import (
 	"github.com/lightcap/dtu-discourse/internal/handler"
 	"github.com/lightcap/dtu-discourse/internal/middleware"
 	"github.com/lightcap/dtu-discourse/internal/store"
+	"github.com/lightcap/dtu-discourse/internal/webhook"
 )
 
 func main() {
@@ -29,13 +30,29 @@ func main() {
 	}
 
 	s := store.New()
-	mux := BuildRouter(s)
+
+	// SSO configuration (optional)
+	s.SSOSecret = os.Getenv("DISCOURSE_CONNECT_SECRET")
+	s.SSOCallbackURL = os.Getenv("SSO_CALLBACK_URL")
+
+	// Webhook dispatcher (optional)
+	webhookURL := os.Getenv("WEBHOOK_URL")
+	webhookSecret := os.Getenv("WEBHOOK_SECRET")
+	dispatcher := webhook.New(webhookURL, webhookSecret)
+
+	mux := BuildRouter(s, dispatcher)
 
 	wrapped := middleware.Auth(s)(mux)
 
 	log.Printf("DTU Discourse listening on :%s", port)
 	log.Printf("Default API key: test_api_key (user: system)")
 	log.Printf("Admin API key:   admin_api_key (user: admin)")
+	if s.SSOSecret != "" && s.SSOCallbackURL != "" {
+		log.Printf("SSO enabled → callback: %s", s.SSOCallbackURL)
+	}
+	if webhookURL != "" {
+		log.Printf("Webhooks enabled → %s", webhookURL)
+	}
 	if err := http.ListenAndServe(":"+port, wrapped); err != nil {
 		fmt.Fprintf(os.Stderr, "server error: %v\n", err)
 		os.Exit(1)
@@ -45,14 +62,14 @@ func main() {
 // BuildRouter creates the HTTP mux with all Discourse-compatible routes.
 // Wildcard path segments (e.g. {username}) will match values with or without
 // a .json suffix; handlers strip the suffix when extracting the value.
-func BuildRouter(s *store.Store) *http.ServeMux {
+func BuildRouter(s *store.Store, dispatcher *webhook.Dispatcher) *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// ---- Core handlers ----
 	users := &handler.UsersHandler{Store: s}
 	cats := &handler.CategoriesHandler{Store: s}
 	topics := &handler.TopicsHandler{Store: s}
-	posts := &handler.PostsHandler{Store: s}
+	posts := &handler.PostsHandler{Store: s, Webhook: dispatcher}
 	groups := &handler.GroupsHandler{Store: s}
 	search := &handler.SearchHandler{Store: s}
 	tags := &handler.TagsHandler{Store: s}
@@ -112,7 +129,10 @@ func BuildRouter(s *store.Store) *http.ServeMux {
 	mux.HandleFunc("PUT /admin/users/{id}/suspend", users.Suspend)
 	mux.HandleFunc("PUT /admin/users/{id}/unsuspend", users.Unsuspend)
 	mux.HandleFunc("PUT /admin/users/{id}/anonymize", users.Anonymize)
+	mux.HandleFunc("PUT /admin/users/{id}/anonymize.json", users.Anonymize)
 	mux.HandleFunc("POST /admin/users/{id}/log_out", users.LogOut)
+	mux.HandleFunc("POST /admin/users/{id}/log_out.json", users.LogOut)
+	mux.HandleFunc("PUT /admin/users/{id}/suspend.json", users.Suspend)
 	mux.HandleFunc("DELETE /admin/users/{id}", users.DeleteUser)
 
 	// ==================================================================
@@ -120,6 +140,7 @@ func BuildRouter(s *store.Store) *http.ServeMux {
 	// ==================================================================
 	mux.HandleFunc("GET /u/search/users", extUsers.SearchUsers)
 	mux.HandleFunc("PUT /u/{username}/preferences/avatar/pick", extUsers.PickAvatar)
+	mux.HandleFunc("PUT /u/{username}/preferences/avatar/pick.json", extUsers.PickAvatar)
 	mux.HandleFunc("PUT /u/{username}/preferences/badge_title", extUsers.SetBadgeTitle)
 	mux.HandleFunc("PUT /u/{username}/preferences/categories", extUsers.SetCategoryPreferences)
 	mux.HandleFunc("PUT /u/{username}/preferences/tags", extUsers.SetTagPreferences)
@@ -179,6 +200,12 @@ func BuildRouter(s *store.Store) *http.ServeMux {
 	mux.HandleFunc("GET /c/{category_slug}/l/latest.json", cats.LatestTopics)
 	mux.HandleFunc("GET /c/{category_slug}/l/top.json", cats.TopTopics)
 	mux.HandleFunc("GET /c/{category_slug}/l/new.json", cats.NewTopics)
+	mux.HandleFunc("GET /c/{category_slug}/l/hot.json", cats.LatestTopics)
+	// Eve app uses /c/{slug}/{id}/l/latest.json pattern
+	mux.HandleFunc("GET /c/{category_slug}/{category_id}/l/latest.json", cats.LatestTopicsBySlugAndID)
+	mux.HandleFunc("GET /c/{category_slug}/{category_id}/l/hot.json", cats.LatestTopicsBySlugAndID)
+	mux.HandleFunc("GET /c/{category_slug}/{category_id}/l/top.json", cats.LatestTopicsBySlugAndID)
+	mux.HandleFunc("GET /c/{category_slug}/{category_id}/l/new.json", cats.LatestTopicsBySlugAndID)
 	mux.HandleFunc("GET /c/{slug}/visible_groups", extCats.VisibleGroups)
 	mux.HandleFunc("GET /c/{id}/show", cats.Show)
 	mux.HandleFunc("GET /c/{id}/show.json", cats.Show)
@@ -192,6 +219,7 @@ func BuildRouter(s *store.Store) *http.ServeMux {
 	topicRouter := &handler.TopicSubRouter{Topics: topics, Extended: extTopics}
 	mux.HandleFunc("GET /latest.json", topics.Latest)
 	mux.HandleFunc("GET /top.json", topics.Top)
+	mux.HandleFunc("GET /top/all.json", topics.Top)
 	mux.HandleFunc("GET /new.json", topics.New)
 	mux.HandleFunc("GET /t/{rest...}", topicRouter.ServeGET)
 	mux.HandleFunc("PUT /t/{rest...}", topicRouter.ServePUT)
@@ -287,6 +315,16 @@ func BuildRouter(s *store.Store) *http.ServeMux {
 	mux.HandleFunc("DELETE /tags/{tag}/synonyms/{synonym}", extTags.RemoveSynonym)
 	mux.HandleFunc("PUT /tags/{tag}", extTags.Update)
 	mux.HandleFunc("DELETE /tags/{tag}", extTags.Delete)
+	// Eve app uses /tag/{tag}/l/{variant}.json for tag-filtered topics
+	mux.HandleFunc("GET /tag/{tag}/l/latest.json", tags.TopicsByTag)
+	mux.HandleFunc("GET /tag/{tag}/l/hot.json", tags.TopicsByTag)
+	mux.HandleFunc("GET /tag/{tag}/l/top.json", tags.TopicsByTag)
+	mux.HandleFunc("GET /tag/{tag}/l/new.json", tags.TopicsByTag)
+	// Eve app uses /tags/c/{slug}/{id}/{tag}/l/{variant}.json for category+tag combos
+	mux.HandleFunc("GET /tags/c/{category_slug}/{category_id}/{tag}/l/latest.json", tags.TopicsByCategoryAndTag)
+	mux.HandleFunc("GET /tags/c/{category_slug}/{category_id}/{tag}/l/hot.json", tags.TopicsByCategoryAndTag)
+	mux.HandleFunc("GET /tags/c/{category_slug}/{category_id}/{tag}/l/top.json", tags.TopicsByCategoryAndTag)
+	mux.HandleFunc("GET /tags/c/{category_slug}/{category_id}/{tag}/l/new.json", tags.TopicsByCategoryAndTag)
 	mux.HandleFunc("GET /tag/{tag}/notifications", extTags.GetNotifications)
 	mux.HandleFunc("PUT /tag/{tag}/notifications", extTags.SetNotifications)
 	mux.HandleFunc("GET /tag/{tag}", tags.Show)
@@ -591,6 +629,7 @@ func BuildRouter(s *store.Store) *http.ServeMux {
 	mux.HandleFunc("GET /session/2fa.json", session.TwoFactorStatus)
 	mux.HandleFunc("GET /session/sso", session.SSORedirect)
 	mux.HandleFunc("GET /session/sso_provider", session.SSOProvider)
+	mux.HandleFunc("GET /session/sso_login", session.SSOLogin)
 	mux.HandleFunc("POST /session/email-login/{token}", session.EmailLogin)
 	mux.HandleFunc("GET /session/email-login/{token}", session.EmailLoginInfo)
 	mux.HandleFunc("DELETE /session/{username}", session.Logout)
@@ -608,6 +647,7 @@ func BuildRouter(s *store.Store) *http.ServeMux {
 
 	// Directory
 	mux.HandleFunc("GET /directory_items", misc.DirectoryItems)
+	mux.HandleFunc("GET /directory_items.json", misc.DirectoryItems)
 	mux.HandleFunc("GET /directory-columns", misc.DirectoryColumns)
 	mux.HandleFunc("PUT /edit-directory-columns", misc.EditDirectoryColumns)
 

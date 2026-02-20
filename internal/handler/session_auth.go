@@ -1,7 +1,13 @@
 package handler
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/lightcap/dtu-discourse/internal/model"
@@ -165,18 +171,96 @@ func (h *SessionHandler) EmailLoginInfo(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
-// ---- SSO (client side) ----
+// ---- SSO (DiscourseConnect) ----
 
 // GET /session/sso
 func (h *SessionHandler) SSORedirect(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"sso_url": "/session/sso_login",
-	})
+	if h.Store.SSOSecret == "" || h.Store.SSOCallbackURL == "" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"sso_url": "/session/sso_login",
+		})
+		return
+	}
+
+	nonce := h.Store.CreateSSONonce()
+	payload := fmt.Sprintf("nonce=%s", nonce)
+	b64 := base64.StdEncoding.EncodeToString([]byte(payload))
+
+	mac := hmac.New(sha256.New, []byte(h.Store.SSOSecret))
+	mac.Write([]byte(b64))
+	sig := hex.EncodeToString(mac.Sum(nil))
+
+	dest := fmt.Sprintf("%s?sso=%s&sig=%s",
+		h.Store.SSOCallbackURL,
+		url.QueryEscape(b64),
+		url.QueryEscape(sig),
+	)
+	http.Redirect(w, r, dest, http.StatusFound)
 }
 
 // GET /session/sso_provider
 func (h *SessionHandler) SSOProvider(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"sso_url": "/session/sso_login",
-	})
+	h.SSORedirect(w, r)
+}
+
+// GET /session/sso_login — handles the return leg of DiscourseConnect SSO.
+func (h *SessionHandler) SSOLogin(w http.ResponseWriter, r *http.Request) {
+	if h.Store.SSOSecret == "" {
+		writeError(w, http.StatusBadRequest, "SSO not configured")
+		return
+	}
+
+	ssoPayload := r.URL.Query().Get("sso")
+	sig := r.URL.Query().Get("sig")
+	if ssoPayload == "" || sig == "" {
+		writeError(w, http.StatusBadRequest, "missing sso or sig parameter")
+		return
+	}
+
+	// Validate HMAC-SHA256 signature
+	mac := hmac.New(sha256.New, []byte(h.Store.SSOSecret))
+	mac.Write([]byte(ssoPayload))
+	expectedSig := hex.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(sig), []byte(expectedSig)) {
+		writeError(w, http.StatusForbidden, "invalid signature")
+		return
+	}
+
+	// Base64-decode and parse params
+	decoded, err := base64.StdEncoding.DecodeString(ssoPayload)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid sso payload encoding")
+		return
+	}
+	params, err := url.ParseQuery(string(decoded))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid sso payload")
+		return
+	}
+
+	nonce := params.Get("nonce")
+	if !h.Store.ValidateSSONonce(nonce) {
+		writeError(w, http.StatusForbidden, "invalid or expired nonce")
+		return
+	}
+
+	externalID := params.Get("external_id")
+	email := params.Get("email")
+	username := params.Get("username")
+	name := params.Get("name")
+	if externalID == "" || email == "" {
+		writeError(w, http.StatusBadRequest, "external_id and email are required")
+		return
+	}
+	if username == "" {
+		username = externalID
+	}
+
+	_, err = h.Store.SyncSSO(externalID, email, username, name)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	http.Redirect(w, r, "/", http.StatusFound)
 }

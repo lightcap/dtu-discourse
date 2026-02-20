@@ -7,10 +7,12 @@ import (
 	"github.com/lightcap/dtu-discourse/internal/middleware"
 	"github.com/lightcap/dtu-discourse/internal/model"
 	"github.com/lightcap/dtu-discourse/internal/store"
+	"github.com/lightcap/dtu-discourse/internal/webhook"
 )
 
 type PostsHandler struct {
-	Store *store.Store
+	Store   *store.Store
+	Webhook *webhook.Dispatcher
 }
 
 // POST /posts  — create post or topic
@@ -60,11 +62,14 @@ func (h *PostsHandler) Create(w http.ResponseWriter, r *http.Request) {
 			archetype = "private_message"
 		}
 
-		_, post, err := h.Store.CreateTopic(title, raw, categoryID, u.ID, tags, archetype)
+		topic, post, err := h.Store.CreateTopic(title, raw, categoryID, u.ID, tags, archetype)
 		if err != nil {
 			writeError(w, http.StatusUnprocessableEntity, err.Error())
 			return
 		}
+		h.Webhook.Dispatch(webhook.GamificationPayload{
+			DiscourseUserID: u.ID, Action: "topic_created", DiscourseResourceID: topic.ID,
+		})
 		writeJSON(w, http.StatusOK, post)
 		return
 	}
@@ -93,6 +98,9 @@ func (h *PostsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	h.Webhook.Dispatch(webhook.GamificationPayload{
+		DiscourseUserID: u.ID, Action: "post_created", DiscourseResourceID: post.ID,
+	})
 	writeJSON(w, http.StatusOK, post)
 }
 
@@ -206,11 +214,31 @@ func (h *PostsHandler) CreateAction(w http.ResponseWriter, r *http.Request) {
 		actionType, _ = strconv.Atoi(v)
 	}
 
+	username := middleware.GetUsername(r)
+	actingUser := h.Store.GetUserByUsername(username)
+
 	pa, err := h.Store.CreatePostAction(postID, actionType)
 	if err != nil {
 		writeError(w, http.StatusNotFound, err.Error())
 		return
 	}
+
+	// Dispatch like webhooks
+	if actionType == 2 && actingUser != nil {
+		post := h.Store.GetPost(postID)
+		if post != nil {
+			authorID := post.UserID
+			h.Webhook.Dispatch(webhook.GamificationPayload{
+				DiscourseUserID: authorID, Action: "reaction_received",
+				DiscourseResourceID: postID, CounterpartyDiscourseUserID: &actingUser.ID,
+			})
+			h.Webhook.Dispatch(webhook.GamificationPayload{
+				DiscourseUserID: actingUser.ID, Action: "reaction_given",
+				DiscourseResourceID: postID,
+			})
+		}
+	}
+
 	writeJSON(w, http.StatusOK, pa)
 }
 

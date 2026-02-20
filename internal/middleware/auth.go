@@ -7,6 +7,7 @@ package middleware
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/lightcap/dtu-discourse/internal/store"
 )
@@ -21,6 +22,13 @@ const (
 func Auth(s *store.Store) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// SSO browser redirects never carry API key headers
+			p := strings.TrimSuffix(r.URL.Path, "/")
+			if p == "/session/sso" || p == "/session/sso_login" || p == "/session/sso_provider" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			apiKey := r.Header.Get("Api-Key")
 			apiUsername := r.Header.Get("Api-Username")
 
